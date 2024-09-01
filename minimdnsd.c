@@ -59,9 +59,6 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 
-// For detecting "hostname" change.
-#include <sys/inotify.h>
-
 // For DNS -> MDNS forwarding we use fork/wait
 #include <sys/wait.h>
 
@@ -93,57 +90,17 @@ int sdifaceupdown;
 int resolver;
 int resolver_listener;
 
-static void ReloadHostname( void )
+static void SetupHostname( void )
 {
-	if( hostname_override )
-	{
-		hostnamelen = strlen( hostname_override );
-		if( hostnamelen >= HOST_NAME_MAX )
-		{
-			hostnamelen = HOST_NAME_MAX - 1;
-		}
-		memcpy( hostname, hostname_override, hostnamelen );
-		hostname[hostnamelen] = 0;
-		printf( "Using overridden name: \"%s.local\"\n", hostname );
-		return;
-	}
-
-	int fh = open( "/etc/hostname", O_RDONLY );
-	if( fh < 1 )
-	{
-		goto hostnamefault;
-	}
-	int rd = read( fh, hostname, HOST_NAME_MAX );
-	close( fh );
-	if( rd <= 0 )
-	{
-		goto hostnamefault;
-	}
-
-	hostnamelen = rd;
-
-	int j;
-	for( j = 0; j < rd; j++ )
-	{
-		char c = hostname[j];
-		if( c == '\n' )                 // Truncate at newline
-		{
-			hostnamelen = j;
-		}
-		else if( c >= 'A' && c <= 'Z' ) // Convert to lowercase
-		{
-			hostname[j] = c + 'z' - 'Z';
-		}
-	}
-	hostname[hostnamelen] = 0;
-
-	printf( "Responding to hostname: \"%s.local\"\n", hostname );
-	fflush( stdout );
-	return;
-
-hostnamefault:
-	fprintf( stderr, "ERROR: Can't stat /etc/hostname\n" );
-	return;
+    hostnamelen = strlen( hostname_override );
+    if( hostnamelen >= HOST_NAME_MAX )
+    {
+        hostnamelen = HOST_NAME_MAX - 1;
+    }
+    memcpy( hostname, hostname_override, hostnamelen );
+    hostname[hostnamelen] = 0;
+    printf( "Using overridden name: \"%s.local\"\n", hostname );
+    return;
 }
 
 #ifndef DISABLE_IPV6
@@ -664,18 +621,13 @@ int main( int argc, char *argv[] )
 		}
 	}
 
-	ReloadHostname();
-
-	int inotifyfd = inotify_init1( IN_NONBLOCK );
-
 	if( !hostname_override )
 	{
-		hostname_watch = inotify_add_watch( inotifyfd, "/etc/hostname", IN_MODIFY | IN_CREATE );
-		if( hostname_watch < 0 )
-		{
-			fprintf( stderr, "WARNING: inotify cannot watch file\n" );
-		}
+            fprintf(stderr, "Hostname is required!\n");
+            return -25;
 	}
+	SetupHostname();
+
 
 	if( resolver < 0 )
 	{
@@ -836,11 +788,10 @@ int main( int argc, char *argv[] )
 		struct pollfd fds[4] = {
 			{ .fd = sdsock, .events = POLLIN | POLLHUP | POLLERR, .revents = 0 },
 			{ .fd = sdifaceupdown, .events = POLLIN | POLLHUP | POLLERR, .revents = 0 },
-			{ .fd = inotifyfd, .events = POLLIN, .revents = 0 },
 			{ .fd = resolver, .events = POLLIN | POLLHUP | POLLERR, .revents = 0 },
 		};
 
-		int polls = resolver ? 4 : 3;
+		int polls = resolver ? 3 : 2;
 
 		// Make poll wait for literally forever.
 		r = poll( fds, polls, -1 );
@@ -882,19 +833,12 @@ int main( int argc, char *argv[] )
 
 		if ( fds[2].revents )
 		{
-			struct inotify_event event;
-			int r = read( inotifyfd, &event, sizeof( event ) );
-			r = r;
-			ReloadHostname();
-		}
-		if ( fds[3].revents )
-		{
-			if ( fds[3].revents & POLLIN )
+			if ( fds[2].revents & POLLIN )
 			{
 				HandleRX( resolver, 1 );
 			}
 
-			if ( fds[3].revents & ( POLLHUP | POLLERR ) )
+			if ( fds[2].revents & ( POLLHUP | POLLERR ) )
 			{
 				fprintf( stderr, "Fatal: resolver socket experienced fault.  Aborting\n" );
 				return -14;
